@@ -18,6 +18,8 @@ from datetime import datetime, date
 import sys
 import os
 import re
+from openpyxl.styles import Font
+from openpyxl import load_workbook
 
 
 class ScheduleApp(QWidget):
@@ -213,7 +215,20 @@ class ScheduleApp(QWidget):
             )
 
         output_df = pd.DataFrame(records, columns=["월", "일", "요일", "근무시간"])
-        output_df.to_excel(f"{target_name}.xlsx", index=False)
+        file_name = f"{target_name}.xlsx"
+        output_df.to_excel(file_name, index=False)
+        wb = load_workbook(file_name)
+        ws = wb.active
+
+        font = Font(name="굴림", size=11)
+
+        for row in ws.iter_rows(
+            min_row=1, max_row=ws.max_row, min_col=1, max_col=ws.max_column
+        ):
+            for cell in row:
+                cell.font = font
+
+        wb.save(file_name)
 
 
 if __name__ == "__main__":
