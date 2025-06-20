@@ -11,8 +11,10 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QLineEdit,
     QTextEdit,
+    QComboBox,
 )
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QPixmap
 import pandas as pd
 from datetime import datetime, date
 import sys
@@ -33,6 +35,16 @@ class ScheduleApp(QWidget):
         main_layout.setContentsMargins(40, 20, 40, 20)
         main_layout.setSpacing(20)
 
+        # 이미지 라벨 생성
+        image_label = QLabel(self)
+        pixmap = QPixmap("arctic_fox.png")  # 이미지 파일 경로
+        image_label.setPixmap(pixmap)
+        image_label.setAlignment(Qt.AlignCenter)
+        image_label.setStyleSheet("margin-bottom: 20px;")
+        image_label.setFixedHeight(200)
+        image_label.setScaledContents(True)
+        image_label.setMaximumWidth(400)
+
         # 근무자 이름
         name_label = QLabel("근무자 이름:")
         name_label.setStyleSheet(
@@ -42,6 +54,18 @@ class ScheduleApp(QWidget):
         self.name_input.setPlaceholderText("예: 권혁준")
         self.name_input.setStyleSheet("font-size: 20px; padding: 6px;")
         self.name_input.setFixedHeight(70)
+
+        # 근무 월 선택
+        month_label = QLabel("근무 월 선택:")
+        month_label.setStyleSheet(
+            "font-size: 30px; font-weight: bold; margin-top: 10px; margin-bottom: 2px;"
+        )
+        self.month_combo = QComboBox()
+        self.month_combo.addItems(
+            ["12-1", "1-2", "2-3", "3-4", "4-5", "5-6", "7-8", "9-10", "11-12"]
+        )
+        self.month_combo.setStyleSheet("font-size: 20px; padding: 6px;")
+        self.month_combo.setFixedHeight(60)
 
         # 파일 선택
         file_label = QLabel("CSV 파일 경로:")
@@ -79,8 +103,11 @@ class ScheduleApp(QWidget):
         button_row.addStretch()
 
         # 전체 배치
+        main_layout.addWidget(image_label, alignment=Qt.AlignCenter)
         main_layout.addWidget(name_label)
         main_layout.addWidget(self.name_input)
+        main_layout.addWidget(month_label)
+        main_layout.addWidget(self.month_combo)
         main_layout.addWidget(file_label)
         main_layout.addLayout(file_row)
         main_layout.addSpacing(40)
@@ -182,8 +209,10 @@ class ScheduleApp(QWidget):
 
             return merged
 
-        start_year = 2025
-        start_month = 4
+        selected_range = self.month_combo.currentText()  # 예: "5-6"
+        start_month = int(selected_range.split("-")[0])  # 앞 숫자만 가져옴
+        start_year = datetime.now().year
+
         weekday_kor = [
             "월요일",
             "화요일",
