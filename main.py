@@ -62,7 +62,20 @@ class ScheduleApp(QWidget):
         )
         self.month_combo = QComboBox()
         self.month_combo.addItems(
-            ["12-1", "1-2", "2-3", "3-4", "4-5", "5-6", "7-8", "9-10", "11-12"]
+            [
+                "12-1",
+                "1-2",
+                "2-3",
+                "3-4",
+                "4-5",
+                "5-6",
+                "6-7",
+                "7-8",
+                "8-9",
+                "9-10",
+                "10-11",
+                "11-12",
+            ]
         )
         self.month_combo.setStyleSheet("font-size: 20px; padding: 6px;")
         self.month_combo.setFixedHeight(60)
