@@ -7,7 +7,7 @@
 
 ## 📥 다운로드
 
-> 다운로드 👉 [Realease 페이지](https://github.com/hyuckjoon9/school-gym/releases/tag/v1.0.1)
+> 다운로드 👉 [Realease 페이지](https://github.com/hyuckjoon9/school-gym/releases/tag/v2.0.0)
 
 - 최신 실행파일: `main.exe`
 - 다운로드 후 압축 해제 없이 바로 실행 가능
