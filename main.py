@@ -464,6 +464,13 @@ class ScheduleApp(QWidget):
             name = self.name_input.text().strip()
             path = self.file_path.text().strip()
             stats = self.get_stats(path, name)
+            if stats is None:
+                QMessageBox.warning(
+                    self,
+                    "오류",
+                    "입력한 이름이 CSV에 없습니다. 이름을 다시 확인하세요.",
+                )
+                return
             self.last_stats = (stats, name, path)
 
             if not self.excel_saved:
@@ -504,6 +511,8 @@ class ScheduleApp(QWidget):
 
         mask = df.applymap(lambda x: target_name in str(x).strip())
         positions = mask.stack()[mask.stack()].index.tolist()
+        if not positions:
+            return None
         results = [(df.at[row, "날짜"], time) for row, time in positions]
 
         date_order = []
