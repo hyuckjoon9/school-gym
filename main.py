@@ -500,7 +500,7 @@ class ScheduleApp(QWidget):
         return True
 
     def get_stats(self, file_path, target_name):
-        """CSV 파일에서 통계 추출 (요일 포함)"""
+        """CSV 파일에서 통계 추출 (시간 변경 고려)"""
         import re
         from datetime import date
 
@@ -513,45 +513,80 @@ class ScheduleApp(QWidget):
         positions = mask.stack()[mask.stack()].index.tolist()
         if not positions:
             return None
-        results = [(df.at[row, "날짜"], time) for row, time in positions]
+
+        # 행 번호와 함께 결과 수집 (시간 순서 파악용)
+        results = [(df.at[row, "날짜"], time, row) for row, time in positions]
 
         date_order = []
-        for d, _ in results:
+        for d, _, _ in results:
             if d not in date_order:
                 date_order.append(d)
 
         grouped = {}
-        for d, t in results:
-            grouped.setdefault(d, []).append(t)
+        for d, t, row_idx in results:
+            grouped.setdefault(d, []).append((t, row_idx))
 
-        def sort_key(t):
-            start = t.split("~")[0].strip()
-            return datetime.strptime(start, "%H:%M")
+        def parse_time_range(time_str):
+            """시간 문자열을 파싱하여 시작/끝 시간 반환"""
+            start_str, end_str = [
+                s.strip() for s in re.sub(r"\s*~\s*", "-", time_str).split("-")
+            ]
+            return (
+                datetime.strptime(start_str, "%H:%M"),
+                datetime.strptime(end_str, "%H:%M"),
+            )
 
-        for d in grouped:
-            grouped[d].sort(key=sort_key)
+        def process_time_changes(time_data_list):
+            """시간 변경을 고려한 근무시간 처리"""
+            # 행 번호 순으로 정렬 (CSV 순서대로)
+            time_data_list.sort(key=lambda x: x[1])
 
-        def merge_time_ranges(time_ranges):
-            # 동일한 merge 로직. 이번에도 튜플로 반환.
-            def to_range(t):
-                start_str, end_str = [
-                    s.strip() for s in re.sub(r"\s*~\s*", "-", t).split("-")
-                ]
-                return (
-                    datetime.strptime(start_str, "%H:%M"),
-                    datetime.strptime(end_str, "%H:%M"),
-                )
+            if not time_data_list:
+                return []
 
-            ranges = [to_range(t) for t in time_ranges]
+            processed_ranges = []
+
+            for time_str, row_idx in time_data_list:
+                try:
+                    start_time, end_time = parse_time_range(time_str)
+                    new_range = (start_time, end_time)
+
+                    # 기존 범위와 겹치는지 확인
+                    overlapped = False
+                    for i, (existing_start, existing_end) in enumerate(
+                        processed_ranges
+                    ):
+                        # 시간대가 겹치거나 인접한 경우
+                        if start_time <= existing_end and end_time >= existing_start:
+                            # 더 최신 데이터로 교체 (나중 행이 우선)
+                            processed_ranges[i] = new_range
+                            overlapped = True
+                            break
+
+                    if not overlapped:
+                        processed_ranges.append(new_range)
+
+                except (ValueError, IndexError):
+                    continue
+
+            return processed_ranges
+
+        def merge_adjacent_ranges(ranges):
+            """인접한 시간대 병합"""
+            if not ranges:
+                return []
+
             ranges.sort()
             merged = []
             current_start, current_end = ranges[0]
+
             for start, end in ranges[1:]:
-                if start == current_end:
-                    current_end = end
+                if start <= current_end:  # 겹치거나 인접
+                    current_end = max(current_end, end)
                 else:
                     merged.append((current_start, current_end))
                     current_start, current_end = start, end
+
             merged.append((current_start, current_end))
             return merged
 
@@ -560,17 +595,21 @@ class ScheduleApp(QWidget):
         total_minutes = 0
 
         for d in date_order:
-            merged_ranges = merge_time_ranges(grouped[d])
+            # 시간 변경을 고려한 처리
+            processed_ranges = process_time_changes(grouped[d])
+            # 인접한 시간대 병합
+            final_ranges = merge_adjacent_ranges(processed_ranges)
+
             day_minutes = sum(
-                int((end - start).total_seconds() // 60) for start, end in merged_ranges
+                int((end - start).total_seconds() // 60) for start, end in final_ranges
             )
             total_minutes += day_minutes
             day_list.append(str(d))
             hours_list.append(round(day_minutes / 60, 2))
 
-        # 날짜별 요일 정보 추가하여 day_labels 생성 (예: "7일 (목)")
+        # 날짜별 요일 정보 추가하여 day_labels 생성
         weekday_kor = ["월", "화", "수", "목", "금", "토", "일"]
-        selected_range = self.month_combo.currentText()  # e.g., "5-6"
+        selected_range = self.month_combo.currentText()
         start_month = int(selected_range.split("-")[0])
         cur_year = datetime.now().year
         cur_month = start_month
@@ -661,7 +700,7 @@ class ScheduleApp(QWidget):
         self.canvas.draw()
 
     def save_to_excel(self, stats, name, csv_path):
-        """엑셀 파일 저장 (수정된 로직)"""
+        """엑셀 파일 저장 (시간 변경 고려)"""
         df = pd.read_csv(csv_path)
         df.dropna(subset=["Unnamed: 0", "Unnamed: 1"], how="all", inplace=True)
         df.rename(columns={"Unnamed: 0": "날짜", "Unnamed: 1": "근무자"}, inplace=True)
@@ -669,50 +708,76 @@ class ScheduleApp(QWidget):
 
         mask = df.applymap(lambda x: name in str(x).strip())
         positions = mask.stack()[mask.stack()].index.tolist()
-        results = [(df.at[row, "날짜"], time) for row, time in positions]
+        results = [(df.at[row, "날짜"], time, row) for row, time in positions]
 
         date_order = []
-        for d, _ in results:
+        for d, _, _ in results:
             if d not in date_order:
                 date_order.append(d)
 
         grouped = {}
-        for d, t in results:
-            grouped.setdefault(d, []).append(t)
+        for d, t, row_idx in results:
+            grouped.setdefault(d, []).append((t, row_idx))
 
-        def sort_key(t):
-            start = t.split("~")[0].strip()
-            return datetime.strptime(start, "%H:%M")
+        def parse_time_range(time_str):
+            start_str, end_str = [
+                s.strip() for s in re.sub(r"\s*~\s*", "-", time_str).split("-")
+            ]
+            return (
+                datetime.strptime(start_str, "%H:%M"),
+                datetime.strptime(end_str, "%H:%M"),
+            )
 
-        for d in grouped:
-            grouped[d].sort(key=sort_key)
+        def process_time_changes(time_data_list):
+            time_data_list.sort(key=lambda x: x[1])
 
-        def merge_time_ranges(time_ranges):
-            # 동일한 merge 로직. 이번에도 튜플로 반환.
-            def to_range(t):
-                start_str, end_str = [
-                    s.strip() for s in re.sub(r"\s*~\s*", "-", t).split("-")
-                ]
-                return (
-                    datetime.strptime(start_str, "%H:%M"),
-                    datetime.strptime(end_str, "%H:%M"),
-                )
+            if not time_data_list:
+                return []
 
-            ranges = [to_range(t) for t in time_ranges]
+            processed_ranges = []
+
+            for time_str, row_idx in time_data_list:
+                try:
+                    start_time, end_time = parse_time_range(time_str)
+                    new_range = (start_time, end_time)
+
+                    overlapped = False
+                    for i, (existing_start, existing_end) in enumerate(
+                        processed_ranges
+                    ):
+                        if start_time <= existing_end and end_time >= existing_start:
+                            processed_ranges[i] = new_range
+                            overlapped = True
+                            break
+
+                    if not overlapped:
+                        processed_ranges.append(new_range)
+
+                except (ValueError, IndexError):
+                    continue
+
+            return processed_ranges
+
+        def merge_adjacent_ranges(ranges):
+            if not ranges:
+                return []
+
             ranges.sort()
             merged = []
             current_start, current_end = ranges[0]
+
             for start, end in ranges[1:]:
-                if start == current_end:
-                    current_end = end
+                if start <= current_end:
+                    current_end = max(current_end, end)
                 else:
                     merged.append((current_start, current_end))
                     current_start, current_end = start, end
+
             merged.append((current_start, current_end))
             return merged
 
-        selected_range = self.month_combo.currentText()  # 예: "5-6"
-        start_month = int(selected_range.split("-")[0])  # 앞 숫자만 가져옴
+        selected_range = self.month_combo.currentText()
+        start_month = int(selected_range.split("-")[0])
         start_year = datetime.now().year
 
         weekday_kor = [
@@ -740,10 +805,14 @@ class ScheduleApp(QWidget):
 
             real_date = date(cur_year, cur_month, day_int)
             weekday = weekday_kor[real_date.weekday()]
-            merged_ranges = merge_time_ranges(grouped[d_str])
+
+            # 시간 변경을 고려한 처리
+            processed_ranges = process_time_changes(grouped[d_str])
+            final_ranges = merge_adjacent_ranges(processed_ranges)
+
             # 문자열로 변환
             merged_times_str = ",".join(
-                f"{s.strftime('%H:%M')}-{e.strftime('%H:%M')}" for s, e in merged_ranges
+                f"{s.strftime('%H:%M')}-{e.strftime('%H:%M')}" for s, e in final_ranges
             )
 
             records.append(
