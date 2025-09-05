@@ -8,6 +8,11 @@ import re
 import pandas as pd
 from datetime import datetime
 
+# 구글 시트 연동 관련 import 추가
+from dotenv import load_dotenv
+import gspread
+from google.oauth2.service_account import Credentials
+
 from PyQt5.QtWidgets import (
     QApplication,
     QWidget,
@@ -45,8 +50,9 @@ else:
 
 # file URI 접두어를 붙여 절대경로로 처리
 # summer_img_path = os.path.join(basedir, "summer.png").replace("\\", "/")
-arctic_img_path = os.path.join(basedir, "arctic_fox.png").replace("\\", "/")
+arctic_img_path = os.path.join(basedir, "assets", "img", "gu.png")
 icon_path = os.path.join(basedir, "assets", "ico", "zzangu.ico")
+env_path = os.path.join(basedir, "config", ".env")
 
 
 def init_app(self):
@@ -115,13 +121,14 @@ class ScheduleApp(QWidget):
 
     def __init__(self):
         super().__init__()
+        self.gcsv_path = None
         self.init_app()
         self.setup_pages()
         self.init_state()
 
     def init_app(self):
         """애플리케이션 초기화 및 심플 화이트 스타일 UI 적용"""
-        self.setWindowTitle("근무시간 병합기")
+        self.setWindowTitle("딸깍 딸깍")
         self.setGeometry(100, 100, 1100, 850)
         self.setAcceptDrops(True)
         self.setStyleSheet(
@@ -192,8 +199,16 @@ class ScheduleApp(QWidget):
         # 상단 여백
         layout.addSpacing(20)
 
-        # 이미지 중앙 배치
-        image_label = self.create_image_widget()
+        # 이미지 중앙 배치 (상단 중앙)
+        image_label = QLabel(self)
+        pixmap = QPixmap(arctic_img_path)
+        image_label.setPixmap(pixmap)
+        image_label.setAlignment(Qt.AlignCenter)
+        image_label.setStyleSheet("margin-bottom: 20px;")
+        image_label.setFixedHeight(180)
+        image_label.setScaledContents(True)
+        image_label.setMaximumWidth(350)
+
         image_row = QHBoxLayout()
         image_row.addStretch()
         image_row.addWidget(image_label)
@@ -298,7 +313,7 @@ class ScheduleApp(QWidget):
         return group
 
     def create_file_group(self):
-        """파일 선택 그룹 생성"""
+        """파일 선택 그룹 생성 + 구글 시트 버튼 추가"""
         group = QGroupBox("CSV 파일 선택")
         group.setStyleSheet("font-size: 20px; font-weight: bold;")
         layout = QHBoxLayout()
@@ -315,34 +330,97 @@ class ScheduleApp(QWidget):
         file_button.setStyleSheet("font-size: 20px; padding: 8px; font-weight: bold")
         file_button.clicked.connect(self.select_file)
 
+        # 구글 시트에서 가져오기 버튼 추가
+        gsheet_button = QPushButton("개쩌는 딸깍")
+        gsheet_button.setFixedWidth(180)
+        gsheet_button.setFixedHeight(50)
+        gsheet_button.setStyleSheet(
+            "font-size: 20px; padding: 8px; font-weight: bold; background-color: #c2f0fc;"
+        )
+        gsheet_button.clicked.connect(self.on_gsheet_btn_clicked)
+
         layout.addWidget(self.file_path)
         layout.addWidget(file_button)
+        layout.addWidget(gsheet_button)
         group.setLayout(layout)
         return group
 
-    def create_page1_buttons(self):
-        """페이지 1 버튼 생성"""
-        layout = QHBoxLayout()
+    def on_gsheet_btn_clicked(self):
+        """구글 시트에서 CSV 가져오기"""
+        name = self.name_input.text().strip()
+        month_range = self.month_combo.currentText().strip()
+        if not name or not month_range:
+            QMessageBox.warning(self, "오류", "이름과 근무 월을 먼저 입력하세요.")
+            return
 
-        self.run_btn = QPushButton("엑셀로 저장 및 통계 보기")
-        self.run_btn.setStyleSheet(
-            """
-            QPushButton {
-                font-size: 18px; 
-                padding: 12px 20px; 
-                font-weight: bold;
-                min-width: 200px;
-                max-width: 300px;
-            }
-        """
-        )
-        self.run_btn.clicked.connect(self.on_run_btn_clicked)
+        try:
+            self.download_gsheet_csv(month_range)
+            csv_path = self.gcsv_path
+            if csv_path and os.path.exists(csv_path):
+                self.file_path.setText(csv_path)
+                QMessageBox.information(
+                    self,
+                    "가져오기 완료",
+                    f"구글 시트에서 CSV를 가져왔습니다:\n{csv_path}",
+                )
+            else:
+                QMessageBox.warning(self, "오류", "CSV 파일을 가져오지 못했습니다.")
+        except Exception as e:
+            QMessageBox.critical(self, "구글 시트 오류", str(e))
 
-        layout.addStretch()
-        layout.addWidget(self.run_btn)
-        layout.addStretch()
+    def download_gsheet_csv(self, worksheet_name):
+        """구글 시트에서 워크시트 데이터를 CSV로 저장하고 경로 반환"""
+        # .env 파일 로딩
+        # load_dotenv(dotenv_path="./config/.env")
+        load_dotenv(dotenv_path=env_path)
+        service_account_path = os.getenv("GSHEET_SERVICE_ACCOUNT")
+        json_path = os.path.join(basedir, "config", service_account_path)
 
-        return layout
+        SHEET_URL = os.getenv("GSHEET_URL")
+        SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+
+        if not json_path or not SHEET_URL:
+            raise Exception(
+                "json_path(구글 키 파일) 또는 GSHEET_URL 환경변수 누락/경로 오류"
+            )
+
+        creds = Credentials.from_service_account_file(json_path, scopes=SCOPES)
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_url(SHEET_URL)
+        worksheet = sh.worksheet(worksheet_name)
+        data = worksheet.get_all_values()
+
+        df = pd.DataFrame(data[1:], columns=data[0])
+        csv_filename = f"{worksheet_name}_from_api.csv"
+        df.to_csv(csv_filename, index=False, encoding="utf-8-sig")
+        self.gcsv_path = csv_filename
+
+    def init_page2(self):
+        """페이지 2: 통계 화면"""
+        layout = QVBoxLayout()
+
+        # 상단 여백
+        layout.addSpacing(20)
+
+        # 통계 및 그래프 (더 큰 공간 할당)
+        stats_group = self.create_stats_group()
+        layout.addWidget(stats_group, stretch=3)  # 3/4 공간 할당
+
+        layout.addSpacing(15)
+
+        # 시급/월급 (작은 공간 할당)
+        wage_group = self.create_wage_group()
+        layout.addWidget(wage_group, stretch=1)  # 1/4 공간 할당
+
+        layout.addSpacing(15)
+
+        # 버튼
+        layout.addLayout(self.create_page2_buttons())
+
+        # 하단 여백
+        layout.addSpacing(20)
+
+        self.page2.setLayout(layout)
 
     def create_stats_group(self):
         """통계 그룹 생성"""
@@ -402,6 +480,30 @@ class ScheduleApp(QWidget):
         layout.addLayout(form_layout)
         group.setLayout(layout)
         return group
+
+    def create_page1_buttons(self):
+        """페이지 1 버튼 생성"""
+        layout = QHBoxLayout()
+
+        self.run_btn = QPushButton("엑셀로 저장 및 통계 보기")
+        self.run_btn.setStyleSheet(
+            """
+            QPushButton {
+                font-size: 18px; 
+                padding: 12px 20px; 
+                font-weight: bold;
+                min-width: 200px;
+                max-width: 300px;
+            }
+        """
+        )
+        self.run_btn.clicked.connect(self.on_run_btn_clicked)
+
+        layout.addStretch()
+        layout.addWidget(self.run_btn)
+        layout.addStretch()
+
+        return layout
 
     def create_page2_buttons(self):
         """페이지 2 버튼 생성 (입력 화면으로 + 다른 사람 선택 버튼 추가)"""
@@ -470,6 +572,12 @@ class ScheduleApp(QWidget):
                     "오류",
                     "입력한 이름이 CSV에 없습니다. 이름을 다시 확인하세요.",
                 )
+                if (
+                    hasattr(self, "gcsv_path")
+                    and self.gcsv_path
+                    and os.path.exists(self.gcsv_path)
+                ):
+                    os.remove(self.gcsv_path)
                 return
             self.last_stats = (stats, name, path)
 
@@ -480,8 +588,20 @@ class ScheduleApp(QWidget):
 
             self.show_stats_on_page2(stats)
             self.stacked.setCurrentIndex(1)
+            if (
+                hasattr(self, "gcsv_path")
+                and self.gcsv_path
+                and os.path.exists(self.gcsv_path)
+            ):
+                os.remove(self.gcsv_path)
 
         except Exception as e:
+            if (
+                hasattr(self, "gcsv_path")
+                and self.gcsv_path
+                and os.path.exists(self.gcsv_path)
+            ):
+                os.remove(self.gcsv_path)
             QMessageBox.critical(self, "오류 발생", str(e))
 
     def validate_input(self):
@@ -505,8 +625,10 @@ class ScheduleApp(QWidget):
         from datetime import date
 
         df = pd.read_csv(file_path)
-        df.dropna(subset=["Unnamed: 0", "Unnamed: 1"], how="all", inplace=True)
-        df.rename(columns={"Unnamed: 0": "날짜", "Unnamed: 1": "근무자"}, inplace=True)
+        df.rename(
+            columns={df.columns[0]: "날짜", df.columns[1]: "근무자"}, inplace=True
+        )
+        df.dropna(subset=["날짜", "근무자"], how="all", inplace=True)
         df["날짜"] = df["날짜"].fillna(method="ffill")
 
         mask = df.applymap(lambda x: target_name in str(x).strip())
