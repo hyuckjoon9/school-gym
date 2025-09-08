@@ -28,10 +28,11 @@ from PyQt5.QtWidgets import (
     QStackedWidget,
     QSpinBox,
     QGroupBox,
+    QProgressBar,
+    QProgressDialog,
 )
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QPixmap
-from PyQt5.QtGui import QIcon
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtGui import QPixmap, QIcon
 import matplotlib
 
 matplotlib.use("Qt5Agg")
@@ -353,20 +354,56 @@ class ScheduleApp(QWidget):
             QMessageBox.warning(self, "오류", "이름과 근무 월을 먼저 입력하세요.")
             return
 
-        try:
-            self.download_gsheet_csv(month_range)
-            csv_path = self.gcsv_path
-            if csv_path and os.path.exists(csv_path):
-                self.file_path.setText(csv_path)
-                QMessageBox.information(
-                    self,
-                    "가져오기 완료",
-                    f"구글 시트에서 CSV를 가져왔습니다:\n{csv_path}",
-                )
-            else:
-                QMessageBox.warning(self, "오류", "CSV 파일을 가져오지 못했습니다.")
-        except Exception as e:
-            QMessageBox.critical(self, "구글 시트 오류", str(e))
+        # 프로그레스 다이얼로그 생성
+        self.progress_dialog = QProgressDialog(
+            "구글 시트에서 데이터 가져오는 중...", "취소", 0, 100, self
+        )
+        self.progress_dialog.setWindowTitle("진행 상황")
+        self.progress_dialog.setModal(True)
+        self.progress_dialog.canceled.connect(self.cancel_gsheet_download)
+        self.progress_dialog.show()
+
+        # 작업 스레드 시작
+        self.google_sheets_worker = GoogleSheetsWorker(month_range)
+        self.google_sheets_worker.progress.connect(self.update_progress)
+        self.google_sheets_worker.status.connect(self.update_status)
+        self.google_sheets_worker.finished.connect(self.on_gsheet_download_finished)
+        self.google_sheets_worker.error.connect(self.show_error_message)
+        self.google_sheets_worker.start()
+
+    def cancel_gsheet_download(self):
+        """구글 시트 다운로드 취소"""
+        if hasattr(self, "google_sheets_worker"):
+            self.google_sheets_worker.terminate()
+            self.google_sheets_worker.wait()
+
+    def update_progress(self, value):
+        """진행 상황 업데이트"""
+        if hasattr(self, "progress_dialog"):
+            self.progress_dialog.setValue(value)
+
+    def update_status(self, message):
+        """상태 메시지 업데이트"""
+        if hasattr(self, "progress_dialog"):
+            self.progress_dialog.setLabelText(message)
+
+    def on_gsheet_download_finished(self, csv_path):
+        """구글 시트 다운로드 완료 처리"""
+        self.gcsv_path = csv_path
+        self.file_path.setText(csv_path)
+        if hasattr(self, "progress_dialog"):
+            self.progress_dialog.close()
+        QMessageBox.information(
+            self,
+            "가져오기 완료",
+            f"구글 시트에서 CSV를 가져왔습니다:\n{csv_path}",
+        )
+
+    def show_error_message(self, message):
+        """에러 메시지 표시"""
+        if hasattr(self, "progress_dialog"):
+            self.progress_dialog.close()
+        QMessageBox.critical(self, "오류", message)
 
     def download_gsheet_csv(self, worksheet_name):
         """구글 시트에서 워크시트 데이터를 CSV로 저장하고 경로 반환"""
@@ -562,32 +599,108 @@ class ScheduleApp(QWidget):
         if not self.validate_input():
             return
 
-        try:
-            name = self.name_input.text().strip()
-            path = self.file_path.text().strip()
-            stats = self.get_stats_new(path, name)
-            if stats is None:
-                QMessageBox.warning(
-                    self,
-                    "오류",
-                    "입력한 이름이 CSV에 없습니다. 이름을 다시 확인하세요.",
-                )
-                if (
-                    hasattr(self, "gcsv_path")
-                    and self.gcsv_path
-                    and os.path.exists(self.gcsv_path)
-                ):
-                    os.remove(self.gcsv_path)
-                return
-            self.last_stats = (stats, name, path)
+        name = self.name_input.text().strip()
+        path = self.file_path.text().strip()
 
-            if not self.excel_saved:
-                self.save_to_excel_new(stats, name, path)
-                self.excel_saved = True
-                self.run_btn.setText("통계 보기")
+        # 프로그레스 다이얼로그 생성
+        self.data_progress_dialog = QProgressDialog(
+            "데이터 처리 중...", "취소", 0, 100, self
+        )
+        self.data_progress_dialog.setWindowTitle("데이터 분석 진행 상황")
+        self.data_progress_dialog.setModal(True)
+        self.data_progress_dialog.canceled.connect(self.cancel_data_processing)
+        self.data_progress_dialog.show()
+
+        # 데이터 처리 스레드 시작
+        self.data_worker = DataProcessingWorker(
+            path, name, self.month_combo.currentText()
+        )
+        self.data_worker.progress.connect(self.update_data_progress)
+        self.data_worker.status.connect(self.update_data_status)
+        self.data_worker.finished.connect(self.on_data_processing_finished)
+        self.data_worker.error.connect(self.show_data_error)
+        self.data_worker.start()
+
+    def cancel_data_processing(self):
+        """데이터 처리 취소"""
+        if hasattr(self, "data_worker"):
+            self.data_worker.terminate()
+            self.data_worker.wait()
+
+    def update_data_progress(self, value):
+        """데이터 처리 진행 상황 업데이트"""
+        if hasattr(self, "data_progress_dialog"):
+            self.data_progress_dialog.setValue(value)
+
+    def update_data_status(self, message):
+        """데이터 처리 상태 메시지 업데이트"""
+        if hasattr(self, "data_progress_dialog"):
+            self.data_progress_dialog.setLabelText(message)
+
+    def on_data_processing_finished(self, stats):
+        """데이터 처리 완료 처리"""
+        if hasattr(self, "data_progress_dialog"):
+            self.data_progress_dialog.close()
+
+        name = self.name_input.text().strip()
+        path = self.file_path.text().strip()
+        self.last_stats = (stats, name, path)
+
+        if not self.excel_saved:
+            # 엑셀 저장도 프로그레스와 함께
+            self.save_to_excel_with_progress(stats, name, path)
+        else:
+            self.show_stats_on_page2(stats)
+            self.stacked.setCurrentIndex(1)
+            # 임시 CSV 파일 정리
+            if (
+                hasattr(self, "gcsv_path")
+                and self.gcsv_path
+                and os.path.exists(self.gcsv_path)
+            ):
+                os.remove(self.gcsv_path)
+
+    def show_data_error(self, message):
+        """데이터 처리 에러 메시지 표시"""
+        if hasattr(self, "data_progress_dialog"):
+            self.data_progress_dialog.close()
+        QMessageBox.warning(self, "오류", message)
+        # 임시 CSV 파일 정리
+        if (
+            hasattr(self, "gcsv_path")
+            and self.gcsv_path
+            and os.path.exists(self.gcsv_path)
+        ):
+            os.remove(self.gcsv_path)
+
+    def save_to_excel_with_progress(self, stats, name, path):
+        """엑셀 저장을 프로그레스와 함께 실행"""
+        try:
+            # 간단한 프로그레스 표시
+            progress = QProgressDialog("엑셀 파일 저장 중...", None, 0, 100, self)
+            progress.setWindowTitle("저장 중")
+            progress.setModal(True)
+            progress.show()
+
+            progress.setValue(20)
+            progress.setLabelText("엑셀 데이터 준비 중...")
+
+            # 기존 save_to_excel_new 함수 호출
+            self.save_to_excel_new(stats, name, path)
+
+            progress.setValue(80)
+            progress.setLabelText("파일 저장 완료...")
+
+            self.excel_saved = True
+            self.run_btn.setText("통계 보기")
+
+            progress.setValue(100)
+            progress.close()
 
             self.show_stats_on_page2(stats)
             self.stacked.setCurrentIndex(1)
+
+            # 임시 CSV 파일 정리
             if (
                 hasattr(self, "gcsv_path")
                 and self.gcsv_path
@@ -596,6 +709,9 @@ class ScheduleApp(QWidget):
                 os.remove(self.gcsv_path)
 
         except Exception as e:
+            if "progress" in locals():
+                progress.close()
+            # 임시 CSV 파일 정리
             if (
                 hasattr(self, "gcsv_path")
                 and self.gcsv_path
@@ -1316,6 +1432,248 @@ class ScheduleApp(QWidget):
         )
 
         self.canvas.draw()
+
+
+class GoogleSheetsWorker(QThread):
+    """구글 시트 다운로드 작업 스레드"""
+
+    progress = pyqtSignal(int)
+    status = pyqtSignal(str)
+    finished = pyqtSignal(str)  # 성공 시 파일 경로
+    error = pyqtSignal(str)  # 에러 시 에러 메시지
+
+    def __init__(self, worksheet_name):
+        super().__init__()
+        self.worksheet_name = worksheet_name
+
+    def run(self):
+        try:
+            self.status.emit("환경 설정 로딩 중...")
+            self.progress.emit(10)
+
+            # .env 파일 로딩
+            load_dotenv(dotenv_path=env_path)
+            service_account_path = os.getenv("GSHEET_SERVICE_ACCOUNT")
+            json_path = os.path.join(basedir, "config", service_account_path)
+            SHEET_URL = os.getenv("GSHEET_URL")
+            SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+
+            if not json_path or not SHEET_URL:
+                self.error.emit(
+                    "json_path(구글 키 파일) 또는 GSHEET_URL 환경변수 누락/경로 오류"
+                )
+                return
+
+            self.status.emit("구글 시트 인증 중...")
+            self.progress.emit(30)
+
+            creds = Credentials.from_service_account_file(json_path, scopes=SCOPES)
+            gc = gspread.authorize(creds)
+
+            self.status.emit("시트 연결 중...")
+            self.progress.emit(50)
+
+            sh = gc.open_by_url(SHEET_URL)
+            worksheet = sh.worksheet(self.worksheet_name)
+
+            self.status.emit("데이터 다운로드 중...")
+            self.progress.emit(70)
+
+            data = worksheet.get_all_values()
+
+            self.status.emit("CSV 파일 생성 중...")
+            self.progress.emit(90)
+
+            df = pd.DataFrame(data[1:], columns=data[0])
+            csv_filename = f"{self.worksheet_name}_from_api.csv"
+            df.to_csv(csv_filename, index=False, encoding="utf-8-sig")
+
+            self.progress.emit(100)
+            self.status.emit("완료!")
+            self.finished.emit(csv_filename)
+
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class DataProcessingWorker(QThread):
+    """데이터 처리 작업 스레드"""
+
+    progress = pyqtSignal(int)
+    status = pyqtSignal(str)
+    finished = pyqtSignal(dict)  # 성공 시 통계 데이터
+    error = pyqtSignal(str)  # 에러 시 에러 메시지
+
+    def __init__(self, file_path, target_name, month_combo_text):
+        super().__init__()
+        self.file_path = file_path
+        self.target_name = target_name
+        self.month_combo_text = month_combo_text
+
+    def run(self):
+        try:
+            self.status.emit("CSV 파일 읽는 중...")
+            self.progress.emit(10)
+
+            import re
+            from datetime import datetime, date
+
+            df = pd.read_csv(self.file_path, header=None)
+
+            self.status.emit("시간 헤더 찾는 중...")
+            self.progress.emit(20)
+
+            # 1단계: 모든 시간 범위 헤더 찾기
+            time_headers = {}
+            for idx, row in df.iterrows():
+                if pd.isna(row.iloc[0]) and pd.isna(row.iloc[1]):
+                    time_ranges = {}
+                    for col_idx in range(2, len(row)):
+                        cell_value = str(row.iloc[col_idx]).strip()
+                        if re.search(
+                            r"\d{1,2}:\d{2}\s*[~-]\s*\d{1,2}:\d{2}", cell_value
+                        ):
+                            time_ranges[col_idx] = cell_value
+                    if time_ranges:
+                        time_headers[idx] = time_ranges
+
+            self.status.emit("근무 데이터 수집 중...")
+            self.progress.emit(40)
+
+            # 2단계: 근무자 데이터 수집
+            work_data = []
+            current_header = None
+            current_header_row = -1
+            current_date = None
+
+            for idx, row in df.iterrows():
+                if idx in time_headers:
+                    current_header = time_headers[idx]
+                    current_header_row = idx
+                    continue
+
+                if current_header is None:
+                    continue
+
+                date_cell = str(row.iloc[0]).strip()
+                if (
+                    not pd.isna(row.iloc[0])
+                    and date_cell
+                    and date_cell != "nan"
+                    and "일" in date_cell
+                ):
+                    current_date = date_cell
+
+                if not pd.isna(row.iloc[1]) and current_date:
+                    for col_idx, cell_value in row.items():
+                        if (
+                            isinstance(cell_value, str)
+                            and self.target_name in cell_value
+                        ):
+                            if col_idx in current_header:
+                                time_range = current_header[col_idx]
+                                work_data.append(
+                                    (current_date, time_range, current_header_row)
+                                )
+
+            if not work_data:
+                self.error.emit("입력한 이름이 CSV에 없습니다. 이름을 다시 확인하세요.")
+                return
+
+            self.status.emit("시간 데이터 계산 중...")
+            self.progress.emit(60)
+
+            # 3단계: 시간 계산
+            def parse_time_range(time_str):
+                parts = re.split(r"[~-]", time_str)
+                start = datetime.strptime(parts[0].strip(), "%H:%M")
+                end = datetime.strptime(parts[1].strip(), "%H:%M")
+                return start, end
+
+            def merge_time_ranges(ranges):
+                if not ranges:
+                    return []
+                ranges.sort(key=lambda x: x[0])
+                merged = [ranges[0]]
+                for current_start, current_end in ranges[1:]:
+                    last_start, last_end = merged[-1]
+                    if current_start <= last_end:
+                        merged[-1] = (last_start, max(last_end, current_end))
+                    else:
+                        merged.append((current_start, current_end))
+                return merged
+
+            date_work = {}
+            date_order = []
+
+            for work_date, time_range, header_row in work_data:
+                if work_date not in date_work:
+                    date_work[work_date] = []
+                    date_order.append(work_date)
+                start_time, end_time = parse_time_range(time_range)
+                date_work[work_date].append((start_time, end_time))
+
+            self.status.emit("통계 생성 중...")
+            self.progress.emit(80)
+
+            day_list = []
+            hours_list = []
+            total_minutes = 0
+
+            for work_date in date_order:
+                merged_ranges = merge_time_ranges(date_work[work_date])
+                day_minutes = sum(
+                    (end - start).total_seconds() / 60 for start, end in merged_ranges
+                )
+                day_hours = day_minutes / 60
+                day_list.append(work_date)
+                hours_list.append(round(day_hours, 2))
+                total_minutes += day_minutes
+
+            # 요일 정보 추가
+            weekday_kor = ["월", "화", "수", "목", "금", "토", "일"]
+            start_month = int(self.month_combo_text.split("-")[0])
+            next_month = int(self.month_combo_text.split("-")[1])
+            cur_year = datetime.now().year
+
+            day_labels = []
+            prev_day = 0
+
+            for d_str in day_list:
+                day_int = int(re.sub(r"\D", "", d_str))
+                if prev_day and day_int < prev_day:
+                    current_month = next_month
+                else:
+                    current_month = start_month
+                prev_day = day_int
+
+                if current_month == 1 and start_month == 12:
+                    cur_year += 1
+
+                real_date = date(cur_year, current_month, day_int)
+                weekday = weekday_kor[real_date.weekday()]
+                day_labels.append(f"{d_str} ({weekday})")
+
+            days = len(day_list)
+            total_hours = total_minutes / 60
+            avg_hours = total_hours / days if days else 0
+
+            self.progress.emit(100)
+            self.status.emit("완료!")
+
+            result = {
+                "days": days,
+                "total_hours": total_hours,
+                "avg_hours": avg_hours,
+                "day_list": day_list,
+                "hours_list": hours_list,
+                "day_labels": day_labels,
+            }
+
+            self.finished.emit(result)
+
+        except Exception as e:
+            self.error.emit(f"데이터 처리 중 오류: {str(e)}")
 
 
 def main():
