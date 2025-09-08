@@ -565,7 +565,7 @@ class ScheduleApp(QWidget):
         try:
             name = self.name_input.text().strip()
             path = self.file_path.text().strip()
-            stats = self.get_stats(path, name)
+            stats = self.get_stats_new(path, name)
             if stats is None:
                 QMessageBox.warning(
                     self,
@@ -582,7 +582,7 @@ class ScheduleApp(QWidget):
             self.last_stats = (stats, name, path)
 
             if not self.excel_saved:
-                self.save_to_excel(stats, name, path)
+                self.save_to_excel_new(stats, name, path)
                 self.excel_saved = True
                 self.run_btn.setText("통계 보기")
 
@@ -620,7 +620,7 @@ class ScheduleApp(QWidget):
         return True
 
     def get_stats(self, file_path, target_name):
-        """CSV 파일에서 통계 추출 (시간 변경 고려)"""
+        """CSV 파일에서 통계 추출 (요일 포함)"""
         import re
         from datetime import date
 
@@ -635,80 +635,45 @@ class ScheduleApp(QWidget):
         positions = mask.stack()[mask.stack()].index.tolist()
         if not positions:
             return None
-
-        # 행 번호와 함께 결과 수집 (시간 순서 파악용)
-        results = [(df.at[row, "날짜"], time, row) for row, time in positions]
+        results = [(df.at[row, "날짜"], time) for row, time in positions]
 
         date_order = []
-        for d, _, _ in results:
+        for d, _ in results:
             if d not in date_order:
                 date_order.append(d)
 
         grouped = {}
-        for d, t, row_idx in results:
-            grouped.setdefault(d, []).append((t, row_idx))
+        for d, t in results:
+            grouped.setdefault(d, []).append(t)
 
-        def parse_time_range(time_str):
-            """시간 문자열을 파싱하여 시작/끝 시간 반환"""
-            start_str, end_str = [
-                s.strip() for s in re.sub(r"\s*~\s*", "-", time_str).split("-")
-            ]
-            return (
-                datetime.strptime(start_str, "%H:%M"),
-                datetime.strptime(end_str, "%H:%M"),
-            )
+        def sort_key(t):
+            start = t.split("~")[0].strip()
+            return datetime.strptime(start, "%H:%M")
 
-        def process_time_changes(time_data_list):
-            """시간 변경을 고려한 근무시간 처리"""
-            # 행 번호 순으로 정렬 (CSV 순서대로)
-            time_data_list.sort(key=lambda x: x[1])
+        for d in grouped:
+            grouped[d].sort(key=sort_key)
 
-            if not time_data_list:
-                return []
+        def merge_time_ranges(time_ranges):
+            # 동일한 merge 로직. 이번에도 튜플로 반환.
+            def to_range(t):
+                start_str, end_str = [
+                    s.strip() for s in re.sub(r"\s*~\s*", "-", t).split("-")
+                ]
+                return (
+                    datetime.strptime(start_str, "%H:%M"),
+                    datetime.strptime(end_str, "%H:%M"),
+                )
 
-            processed_ranges = []
-
-            for time_str, row_idx in time_data_list:
-                try:
-                    start_time, end_time = parse_time_range(time_str)
-                    new_range = (start_time, end_time)
-
-                    # 기존 범위와 겹치는지 확인
-                    overlapped = False
-                    for i, (existing_start, existing_end) in enumerate(
-                        processed_ranges
-                    ):
-                        # 시간대가 겹치거나 인접한 경우
-                        if start_time <= existing_end and end_time >= existing_start:
-                            # 더 최신 데이터로 교체 (나중 행이 우선)
-                            processed_ranges[i] = new_range
-                            overlapped = True
-                            break
-
-                    if not overlapped:
-                        processed_ranges.append(new_range)
-
-                except (ValueError, IndexError):
-                    continue
-
-            return processed_ranges
-
-        def merge_adjacent_ranges(ranges):
-            """인접한 시간대 병합"""
-            if not ranges:
-                return []
-
+            ranges = [to_range(t) for t in time_ranges]
             ranges.sort()
             merged = []
             current_start, current_end = ranges[0]
-
             for start, end in ranges[1:]:
-                if start <= current_end:  # 겹치거나 인접
-                    current_end = max(current_end, end)
+                if start == current_end:
+                    current_end = end
                 else:
                     merged.append((current_start, current_end))
                     current_start, current_end = start, end
-
             merged.append((current_start, current_end))
             return merged
 
@@ -717,21 +682,17 @@ class ScheduleApp(QWidget):
         total_minutes = 0
 
         for d in date_order:
-            # 시간 변경을 고려한 처리
-            processed_ranges = process_time_changes(grouped[d])
-            # 인접한 시간대 병합
-            final_ranges = merge_adjacent_ranges(processed_ranges)
-
+            merged_ranges = merge_time_ranges(grouped[d])
             day_minutes = sum(
-                int((end - start).total_seconds() // 60) for start, end in final_ranges
+                int((end - start).total_seconds() // 60) for start, end in merged_ranges
             )
             total_minutes += day_minutes
             day_list.append(str(d))
             hours_list.append(round(day_minutes / 60, 2))
 
-        # 날짜별 요일 정보 추가하여 day_labels 생성
+        # 날짜별 요일 정보 추가하여 day_labels 생성 (예: "7일 (목)")
         weekday_kor = ["월", "화", "수", "목", "금", "토", "일"]
-        selected_range = self.month_combo.currentText()
+        selected_range = self.month_combo.currentText()  # e.g., "5-6"
         start_month = int(selected_range.split("-")[0])
         cur_year = datetime.now().year
         cur_month = start_month
@@ -762,67 +723,189 @@ class ScheduleApp(QWidget):
             "day_labels": day_labels,
         }
 
-    def create_chart(self, stats):
-        """차트 생성 (정보가 잘리지 않도록 내부 여백 충분히 확보)"""
-        self.figure.clear()
-        ax = self.figure.add_subplot(111)
+    def get_stats_new(self, file_path, target_name):
+        """CSV 파일에서 통계 추출 - 완전히 새로운 로직"""
+        import re
+        from datetime import datetime, date
 
-        day_labels = stats.get("day_labels", stats["day_list"])
-        hours = stats["hours_list"]
+        df = pd.read_csv(file_path, header=None)
 
-        bars = ax.bar(range(len(day_labels)), hours, color="#4a90e2", width=0.5)
+        # CSV 내용 전체 출력
+        print("=== CSV 파일 내용 ===")
+        print(df.to_string())
+        print("===================")
 
-        ax.set_title(
-            "일별 근무시간",
-            fontdict={"fontsize": 14, "fontfamily": "Malgun Gothic"},
-            pad=26,
-        )
-        ax.set_xlabel(
-            "날짜",
-            fontdict={"fontsize": 12, "fontfamily": "Malgun Gothic"},
-            labelpad=7,
-        )
-        ax.set_ylabel(
-            "근무시간(시간)",
-            fontdict={"fontsize": 12, "fontfamily": "Malgun Gothic"},
-            labelpad=7,
-        )
+        # 1단계: 모든 시간 범위 헤더 찾기
+        time_headers = {}  # {행번호: {열번호: 시간범위}}
 
-        ax.set_xticks(range(len(day_labels)))
-        ax.set_xticklabels(
-            day_labels, rotation=45, fontsize=9, fontfamily="Malgun Gothic"
-        )
-        ax.tick_params(axis="y", labelsize=9)
+        for idx, row in df.iterrows():
+            # 첫 두 열이 비어있고 시간 형식이 있는 행 찾기
+            if pd.isna(row.iloc[0]) and pd.isna(row.iloc[1]):
+                time_ranges = {}
+                for col_idx in range(2, len(row)):
+                    cell_value = str(row.iloc[col_idx]).strip()
+                    if re.search(r"\d{1,2}:\d{2}\s*[~-]\s*\d{1,2}:\d{2}", cell_value):
+                        time_ranges[col_idx] = cell_value
 
-        max_hours = max(hours) if hours else 0
-        ax.set_ylim(0, max_hours * 1.1)
+                if time_ranges:  # 시간 범위가 있으면 헤더로 인정
+                    time_headers[idx] = time_ranges
+                    print(f"시간 헤더 발견 (행 {idx}): {time_ranges}")
 
-        for bar, h in zip(bars, hours):
-            ax.text(
-                bar.get_x() + bar.get_width() / 2,
-                h + max(hours) * 0.01,
-                f"{h:.1f}h",
-                ha="center",
-                va="bottom",
-                fontsize=8,
-                fontfamily="Malgun Gothic",
-                color="#333",
-                weight="bold",
+        # 2단계: 각 날짜별로 근무자 데이터 수집
+        work_data = []  # [(날짜, 시간범위, 헤더행번호)]
+        current_header = None
+        current_header_row = -1
+        current_date = None
+
+        for idx, row in df.iterrows():
+            # 새로운 시간 헤더인가?
+            if idx in time_headers:
+                current_header = time_headers[idx]
+                current_header_row = idx
+                continue
+
+            # 현재 시간 헤더가 없으면 스킵
+            if current_header is None:
+                continue
+
+            # 날짜가 있는 행인가? (더 정확한 감지)
+            date_cell = str(row.iloc[0]).strip()
+            if (
+                not pd.isna(row.iloc[0])
+                and date_cell
+                and date_cell != "nan"
+                and "일" in date_cell
+            ):
+                current_date = date_cell
+                print(f"날짜 업데이트: {current_date}")
+
+            # 근무자 행 처리 (current_date가 있을 때만)
+            if not pd.isna(row.iloc[1]) and current_date:
+                # 해당 근무자의 데이터 찾기
+                for col_idx, cell_value in row.items():
+                    if isinstance(cell_value, str) and target_name in cell_value:
+                        if col_idx in current_header:
+                            time_range = current_header[col_idx]
+                            work_data.append(
+                                (current_date, time_range, current_header_row)
+                            )
+                            print(
+                                f"근무 데이터: {current_date}, {time_range}, 헤더{current_header_row}"
+                            )
+
+        if not work_data:
+            return None
+
+        # 3단계: 날짜별로 그룹화 및 시간 계산
+        def parse_time_range(time_str):
+            """시간 범위 문자열을 시작/끝 시간으로 파싱"""
+            parts = re.split(r"[~-]", time_str)
+            start = datetime.strptime(parts[0].strip(), "%H:%M")
+            end = datetime.strptime(parts[1].strip(), "%H:%M")
+            return start, end
+
+        def merge_time_ranges(ranges):
+            """시간 범위들을 병합"""
+            if not ranges:
+                return []
+
+            # 시작 시간으로 정렬
+            ranges.sort(key=lambda x: x[0])
+            merged = [ranges[0]]
+
+            for current_start, current_end in ranges[1:]:
+                last_start, last_end = merged[-1]
+
+                # 연속되거나 겹치는 시간이면 병합
+                if current_start <= last_end:
+                    merged[-1] = (last_start, max(last_end, current_end))
+                else:
+                    merged.append((current_start, current_end))
+
+            return merged
+
+        # 날짜별로 정리 - CSV 순서대로 유지 (정렬하지 않음)
+        date_work = {}  # {날짜: [(시작시간, 끝시간)]}
+        date_order = []  # CSV에서 나타난 순서대로
+
+        for work_date, time_range, header_row in work_data:
+            if work_date not in date_work:
+                date_work[work_date] = []
+                date_order.append(work_date)  # 처음 나타난 순서대로 저장
+
+            start_time, end_time = parse_time_range(time_range)
+            date_work[work_date].append((start_time, end_time))
+
+        # CSV 순서대로 처리 (정렬하지 않음)
+        day_list = []
+        hours_list = []
+        total_minutes = 0
+
+        for work_date in date_order:  # sorted_dates 대신 date_order 사용
+            # 해당 날짜의 시간 범위들을 병합
+            merged_ranges = merge_time_ranges(date_work[work_date])
+
+            # 총 근무 시간 계산
+            day_minutes = sum(
+                (end - start).total_seconds() / 60 for start, end in merged_ranges
+            )
+            day_hours = day_minutes / 60
+
+            day_list.append(work_date)
+            hours_list.append(round(day_hours, 2))
+            total_minutes += day_minutes
+
+            print(f"{work_date}: {day_hours:.2f}시간")
+
+        # 요일 정보 추가 - 올바른 월 계산
+        weekday_kor = ["월", "화", "수", "목", "금", "토", "일"]
+        selected_range = self.month_combo.currentText()  # 예: "8-9"
+        start_month = int(selected_range.split("-")[0])  # 8
+        next_month = int(selected_range.split("-")[1])  # 9
+        cur_year = datetime.now().year
+
+        day_labels = []
+        prev_day = 0
+
+        for d_str in day_list:
+            day_int = int(re.sub(r"\D", "", d_str))
+
+            # 날짜가 작아지면 다음 월로 넘어간 것
+            if prev_day and day_int < prev_day:
+                current_month = next_month
+            else:
+                current_month = start_month
+
+            prev_day = day_int
+
+            # 다음 월이 1월이면 연도 증가
+            if current_month == 1 and start_month == 12:
+                cur_year += 1
+
+            real_date = date(cur_year, current_month, day_int)
+            weekday = weekday_kor[real_date.weekday()]
+            day_labels.append(f"{d_str} ({weekday})")
+            print(
+                f"날짜 처리: {d_str} → {cur_year}년 {current_month}월 {day_int}일 ({weekday})"
             )
 
-        # 내부 플롯 영역을 줄여 상하좌우 여백을 넉넉히 확보 (정보가 안 짤리게!)
-        self.figure.tight_layout(pad=2.25)
-        self.figure.subplots_adjust(
-            left=0.13,  # 좌측 여백 약간 늘림
-            right=0.97,  # 우측 여백 약간 늘림
-            bottom=0.28,  # 하단 여백 충분히 확보 (x축 날짜 안 짤리게)
-            top=0.80,  # 상단 여백 충분히 확보 (제목 안 짤리게)
-        )
+        days = len(day_list)
+        total_hours = total_minutes / 60
+        avg_hours = total_hours / days if days else 0
 
-        self.canvas.draw()
+        print(f"총 근무시간: {total_hours:.2f}시간")
+
+        return {
+            "days": days,
+            "total_hours": total_hours,
+            "avg_hours": avg_hours,
+            "day_list": day_list,
+            "hours_list": hours_list,
+            "day_labels": day_labels,
+        }
 
     def save_to_excel(self, stats, name, csv_path):
-        """엑셀 파일 저장 (시간 변경 고려)"""
+        """엑셀 파일 저장 (수정된 로직)"""
         df = pd.read_csv(csv_path)
         df.dropna(subset=["Unnamed: 0", "Unnamed: 1"], how="all", inplace=True)
         df.rename(columns={"Unnamed: 0": "날짜", "Unnamed: 1": "근무자"}, inplace=True)
@@ -830,76 +913,50 @@ class ScheduleApp(QWidget):
 
         mask = df.applymap(lambda x: name in str(x).strip())
         positions = mask.stack()[mask.stack()].index.tolist()
-        results = [(df.at[row, "날짜"], time, row) for row, time in positions]
+        results = [(df.at[row, "날짜"], time) for row, time in positions]
 
         date_order = []
-        for d, _, _ in results:
+        for d, _ in results:
             if d not in date_order:
                 date_order.append(d)
 
         grouped = {}
-        for d, t, row_idx in results:
-            grouped.setdefault(d, []).append((t, row_idx))
+        for d, t in results:
+            grouped.setdefault(d, []).append(t)
 
-        def parse_time_range(time_str):
-            start_str, end_str = [
-                s.strip() for s in re.sub(r"\s*~\s*", "-", time_str).split("-")
-            ]
-            return (
-                datetime.strptime(start_str, "%H:%M"),
-                datetime.strptime(end_str, "%H:%M"),
-            )
+        def sort_key(t):
+            start = t.split("~")[0].strip()
+            return datetime.strptime(start, "%H:%M")
 
-        def process_time_changes(time_data_list):
-            time_data_list.sort(key=lambda x: x[1])
+        for d in grouped:
+            grouped[d].sort(key=sort_key)
 
-            if not time_data_list:
-                return []
+        def merge_time_ranges(time_ranges):
+            # 동일한 merge 로직. 이번에도 튜플로 반환.
+            def to_range(t):
+                start_str, end_str = [
+                    s.strip() for s in re.sub(r"\s*~\s*", "-", t).split("-")
+                ]
+                return (
+                    datetime.strptime(start_str, "%H:%M"),
+                    datetime.strptime(end_str, "%H:%M"),
+                )
 
-            processed_ranges = []
-
-            for time_str, row_idx in time_data_list:
-                try:
-                    start_time, end_time = parse_time_range(time_str)
-                    new_range = (start_time, end_time)
-
-                    overlapped = False
-                    for i, (existing_start, existing_end) in enumerate(
-                        processed_ranges
-                    ):
-                        if start_time <= existing_end and end_time >= existing_start:
-                            processed_ranges[i] = new_range
-                            overlapped = True
-                            break
-
-                    if not overlapped:
-                        processed_ranges.append(new_range)
-
-                except (ValueError, IndexError):
-                    continue
-
-            return processed_ranges
-
-        def merge_adjacent_ranges(ranges):
-            if not ranges:
-                return []
-
+            ranges = [to_range(t) for t in time_ranges]
             ranges.sort()
             merged = []
             current_start, current_end = ranges[0]
-
             for start, end in ranges[1:]:
-                if start <= current_end:
-                    current_end = max(current_end, end)
+                if start == current_end:
+                    current_end = end
                 else:
                     merged.append((current_start, current_end))
                     current_start, current_end = start, end
-
             merged.append((current_start, current_end))
             return merged
 
-        selected_range = self.month_combo.currentText()
-        start_month = int(selected_range.split("-")[0])
+        selected_range = self.month_combo.currentText()  # 예: "5-6"
+        start_month = int(selected_range.split("-")[0])  # 앞 숫자만 가져옴
         start_year = datetime.now().year
 
         weekday_kor = [
@@ -927,14 +984,10 @@ class ScheduleApp(QWidget):
 
             real_date = date(cur_year, cur_month, day_int)
             weekday = weekday_kor[real_date.weekday()]
-
-            # 시간 변경을 고려한 처리
-            processed_ranges = process_time_changes(grouped[d_str])
-            final_ranges = merge_adjacent_ranges(processed_ranges)
-
+            merged_ranges = merge_time_ranges(grouped[d_str])
             # 문자열로 변환
             merged_times_str = ",".join(
-                f"{s.strftime('%H:%M')}-{e.strftime('%H:%M')}" for s, e in final_ranges
+                f"{s.strftime('%H:%M')}-{e.strftime('%H:%M')}" for s, e in merged_ranges
             )
 
             records.append(
@@ -948,6 +1001,200 @@ class ScheduleApp(QWidget):
 
         output_df = pd.DataFrame(records, columns=["월", "일", "요일", "근무시간"])
         file_name = f"{name}.xlsx"
+        output_df.to_excel(file_name, index=False)
+
+        from openpyxl import load_workbook
+        from openpyxl.styles import Font
+
+        wb = load_workbook(file_name)
+        ws = wb.active
+
+        font = Font(name="굴림", size=11)
+        for row in ws.iter_rows(
+            min_row=1, max_row=ws.max_row, min_col=1, max_col=ws.max_column
+        ):
+            for cell in row:
+                cell.font = font
+
+        wb.save(file_name)
+        QMessageBox.information(
+            self, "저장 완료", f"엑셀 파일이 저장되었습니다:\n{file_name}"
+        )
+
+    def save_to_excel_new(self, stats, name, csv_path):
+        """엑셀 파일 저장 - 새로운 로직"""
+        import re
+        from datetime import datetime, date
+
+        df = pd.read_csv(csv_path, header=None)
+
+        # 1단계: 모든 시간 범위 헤더 찾기
+        time_headers = {}  # {행번호: {열번호: 시간범위}}
+
+        for idx, row in df.iterrows():
+            # 첫 두 열이 비어있고 시간 형식이 있는 행 찾기
+            if pd.isna(row.iloc[0]) and pd.isna(row.iloc[1]):
+                time_ranges = {}
+                for col_idx in range(2, len(row)):
+                    cell_value = str(row.iloc[col_idx]).strip()
+                    if re.search(r"\d{1,2}:\d{2}\s*[~-]\s*\d{1,2}:\d{2}", cell_value):
+                        time_ranges[col_idx] = cell_value
+
+                if time_ranges:  # 시간 범위가 있으면 헤더로 인정
+                    time_headers[idx] = time_ranges
+
+        # 2단계: 각 날짜별로 근무자 데이터 수집
+        work_data = []  # [(날짜, 시간범위, 헤더행번호)]
+        current_header = None
+        current_header_row = -1
+        current_date = None
+
+        for idx, row in df.iterrows():
+            # 새로운 시간 헤더인가?
+            if idx in time_headers:
+                current_header = time_headers[idx]
+                current_header_row = idx
+                continue
+
+            # 현재 시간 헤더가 없으면 스킵
+            if current_header is None:
+                continue
+
+            # 날짜가 있는 행인가? (더 정확한 감지)
+            date_cell = str(row.iloc[0]).strip()
+            if (
+                not pd.isna(row.iloc[0])
+                and date_cell
+                and date_cell != "nan"
+                and "일" in date_cell
+            ):
+                current_date = date_cell
+
+            # 근무자 행 처리 (current_date가 있을 때만)
+            if not pd.isna(row.iloc[1]) and current_date:
+                # 해당 근무자의 데이터 찾기
+                for col_idx, cell_value in row.items():
+                    if isinstance(cell_value, str) and name in cell_value:
+                        if col_idx in current_header:
+                            time_range = current_header[col_idx]
+                            work_data.append(
+                                (current_date, time_range, current_header_row)
+                            )
+
+        if not work_data:
+            QMessageBox.warning(
+                self, "오류", "해당 근무자의 데이터를 찾을 수 없습니다."
+            )
+            return
+
+        # 3단계: 날짜별로 정리하고 엑셀 형식으로 변환
+        def parse_time_range(time_str):
+            """시간 범위 문자열을 시작/끝 시간으로 파싱"""
+            parts = re.split(r"[~-]", time_str)
+            start = datetime.strptime(parts[0].strip(), "%H:%M")
+            end = datetime.strptime(parts[1].strip(), "%H:%M")
+            return start, end
+
+        def merge_time_ranges(ranges):
+            """시간 범위들을 병합"""
+            if not ranges:
+                return []
+
+            # 시작 시간으로 정렬
+            ranges.sort(key=lambda x: x[0])
+            merged = [ranges[0]]
+
+            for current_start, current_end in ranges[1:]:
+                last_start, last_end = merged[-1]
+
+                # 연속되거나 겹치는 시간이면 병합
+                if current_start <= last_end:
+                    merged[-1] = (last_start, max(last_end, current_end))
+                else:
+                    merged.append((current_start, current_end))
+
+            return merged
+
+        # 날짜별로 정리 - CSV 순서대로 유지
+        date_work = {}  # {날짜: [(시작시간, 끝시간)]}
+        date_order = []  # CSV에서 나타난 순서대로
+
+        for work_date, time_range, header_row in work_data:
+            if work_date not in date_work:
+                date_work[work_date] = []
+                date_order.append(work_date)  # 처음 나타난 순서대로 저장
+
+            start_time, end_time = parse_time_range(time_range)
+            date_work[work_date].append((start_time, end_time))
+
+        selected_range = self.month_combo.currentText()  # 예: "8-9"
+        start_month = int(selected_range.split("-")[0])  # 8
+        next_month = int(selected_range.split("-")[1])  # 9
+        start_year = datetime.now().year
+
+        weekday_kor = [
+            "월요일",
+            "화요일",
+            "수요일",
+            "목요일",
+            "금요일",
+            "토요일",
+            "일요일",
+        ]
+
+        records = []
+        prev_day = 0
+        is_next_month = False  # 다음 월로 넘어갔는지 추적
+
+        for work_date in date_order:  # sorted_dates 대신 date_order 사용
+            day_int = int(re.sub(r"\D", "", work_date))
+
+            # 날짜가 작아지면 다음 월로 넘어간 것
+            if prev_day and day_int < prev_day:
+                is_next_month = True
+
+            # 월과 연도 결정
+            if is_next_month:
+                current_month = next_month
+                current_year = start_year
+                # 다음 월이 1월이면 연도 증가
+                if current_month == 1 and start_month == 12:
+                    current_year += 1
+            else:
+                current_month = start_month
+                current_year = start_year
+
+            prev_day = day_int
+
+            real_date = date(current_year, current_month, day_int)
+            weekday = weekday_kor[real_date.weekday()]
+
+            # 해당 날짜의 시간 범위들을 병합
+            merged_ranges = merge_time_ranges(date_work[work_date])
+
+            # 시간 문자열 생성
+            time_strs = []
+            for start_time, end_time in merged_ranges:
+                time_str = (
+                    f"{start_time.strftime('%H:%M')}-{end_time.strftime('%H:%M')}"
+                )
+                time_strs.append(time_str)
+
+            merged_times_str = ",".join(time_strs)
+
+            records.append(
+                {
+                    "월": current_month,
+                    "일": day_int,
+                    "요일": weekday,
+                    "근무시간": merged_times_str,
+                }
+            )
+
+            print(f"엑셀: {work_date} → {current_year}년 {current_month}월 {day_int}일")
+
+        output_df = pd.DataFrame(records, columns=["월", "일", "요일", "근무시간"])
+        file_name = f"{name}_{selected_range}.xlsx"
         output_df.to_excel(file_name, index=False)
 
         from openpyxl import load_workbook
@@ -1010,6 +1257,65 @@ class ScheduleApp(QWidget):
         self.total_hours = stats["total_hours"]
         self.update_salary()
         self.create_chart(stats)
+
+    def create_chart(self, stats):
+        """차트 생성 (정보가 잘리지 않도록 내부 여백 충분히 확보)"""
+        self.figure.clear()
+        ax = self.figure.add_subplot(111)
+
+        day_labels = stats.get("day_labels", stats["day_list"])
+        hours = stats["hours_list"]
+
+        bars = ax.bar(range(len(day_labels)), hours, color="#4a90e2", width=0.5)
+
+        ax.set_title(
+            "일별 근무시간",
+            fontdict={"fontsize": 14, "fontfamily": "Malgun Gothic"},
+            pad=26,
+        )
+        ax.set_xlabel(
+            "날짜",
+            fontdict={"fontsize": 12, "fontfamily": "Malgun Gothic"},
+            labelpad=7,
+        )
+        ax.set_ylabel(
+            "근무시간(시간)",
+            fontdict={"fontsize": 12, "fontfamily": "Malgun Gothic"},
+            labelpad=7,
+        )
+
+        ax.set_xticks(range(len(day_labels)))
+        ax.set_xticklabels(
+            day_labels, rotation=45, fontsize=9, fontfamily="Malgun Gothic"
+        )
+        ax.tick_params(axis="y", labelsize=9)
+
+        max_hours = max(hours) if hours else 0
+        ax.set_ylim(0, max_hours * 1.1)
+
+        for bar, h in zip(bars, hours):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                h + max(hours) * 0.01,
+                f"{h:.1f}h",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                fontfamily="Malgun Gothic",
+                color="#333",
+                weight="bold",
+            )
+
+        # 내부 플롯 영역을 줄여 상하좌우 여백을 넉넉히 확보 (정보가 안 짤리게!)
+        self.figure.tight_layout(pad=2.25)
+        self.figure.subplots_adjust(
+            left=0.13,  # 좌측 여백 약간 늘림
+            right=0.97,  # 우측 여백 약간 늘림
+            bottom=0.28,  # 하단 여백 충분히 확보 (x축 날짜 안 짤리게)
+            top=0.80,  # 상단 여백 충분히 확보 (제목 안 짤리게)
+        )
+
+        self.canvas.draw()
 
 
 def main():
